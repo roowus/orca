@@ -5,6 +5,7 @@ import { SESSION_RELEVANT_FIELDS, shouldPersistWorkspaceSession } from './worksp
 import { buildWorkspaceSessionPatch } from './workspace-session-patch'
 import { createWorktreeTabBucketProjection } from '../tabs/worktree-tab-bucket-projection'
 import { createBrowserSessionHandlesProjection } from './browser-session-handles-projection'
+import { terminalTabsDifferOnlyInPresentation } from '../../../../../shared/workspace-layout/terminal-topology/terminal-tab-presentation-change'
 
 type SessionRelevantField = (typeof SESSION_RELEVANT_FIELDS)[number]
 type TabsByWorktree = AppState['tabsByWorktree']
@@ -14,7 +15,7 @@ type UnifiedTab = UnifiedTabsByWorktree[string][number]
 
 const TERMINAL_TAB_LIVE_TITLE_KEYS = new Set<keyof TerminalTab>(['title'])
 // Handoff flags are stripped from sessions; toggling alone must not rebuild durable payloads.
-const TERMINAL_TAB_TRANSIENT_SESSION_KEYS = new Set<keyof TerminalTab>([
+const TERMINAL_TAB_TRANSIENT_SESSION_KEYS: ReadonlySet<string> = new Set<keyof TerminalTab>([
   'pendingActivationSpawn',
   'recovery'
 ])
@@ -108,6 +109,8 @@ export function createSessionWriteSubscriber({
   let prevBrowserHandlesSource: AppState['remoteBrowserPageHandlesByPageId'] | null = null
   // Pending fields are the only owed-write ledger after prev advances. In-flight writes own their fields until ACK; failures merge them back without replacing newer same-field edits.
   const pendingChangedFields = new Set<SessionRelevantField>()
+  // A pending tabsByWorktree write also owes its derived layouts and bindings unless every change since the last write was presentation-only.
+  let terminalTabsTopologyPending = false
   const terminalTabsProjection = createTerminalSessionTabsProjection()
   const unifiedTabsProjection = createUnifiedSessionTabsProjection()
   const browserHandlesProjection = createBrowserSessionHandlesProjection()
@@ -124,7 +127,12 @@ export function createSessionWriteSubscriber({
     }
     const changed = new Set(pendingChangedFields)
     pendingChangedFields.clear()
-    const patch = buildWorkspaceSessionPatch(fresh, changed)
+    const terminalTabsPresentationOnly =
+      changed.has('tabsByWorktree') && !terminalTabsTopologyPending
+    if (changed.has('tabsByWorktree')) {
+      terminalTabsTopologyPending = false
+    }
+    const patch = buildWorkspaceSessionPatch(fresh, changed, { terminalTabsPresentationOnly })
     if (Object.keys(patch).length === 0) {
       return
     }
@@ -137,6 +145,10 @@ export function createSessionWriteSubscriber({
       if (failed) {
         for (const field of changed) {
           pendingChangedFields.add(field)
+        }
+        // A partial failure can leave main's derived fields behind; the retry rebuilds them.
+        if (changed.has('tabsByWorktree')) {
+          terminalTabsTopologyPending = true
         }
         // A rejection waits for the next store wake, not a retry loop.
         onPersistError?.(error)
@@ -228,6 +240,17 @@ export function createSessionWriteSubscriber({
     prevBrowserHandlesSource = state.remoteBrowserPageHandlesByPageId
     if (changedFields.length === 0 && pendingChangedFields.size === 0) {
       return
+    }
+    if (
+      changedFields.includes('tabsByWorktree') &&
+      (prev === null ||
+        !terminalTabsDifferOnlyInPresentation(
+          prev.tabsByWorktree as TabsByWorktree,
+          next.tabsByWorktree as TabsByWorktree,
+          TERMINAL_TAB_TRANSIENT_SESSION_KEYS
+        ))
+    ) {
+      terminalTabsTopologyPending = true
     }
     prev = next
     for (const field of changedFields) {

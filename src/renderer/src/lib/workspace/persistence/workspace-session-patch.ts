@@ -50,11 +50,19 @@ function buildPrunedTerminalScrollback(
 
 export function buildWorkspaceSessionPatch(
   fullSnapshot: WorkspaceSessionSnapshot,
-  changedFields: Iterable<SessionRelevantField>
+  changedFields: Iterable<SessionRelevantField>,
+  options: {
+    /** Terminal tabs changed only in labels or color, so layouts and bindings derived from them did not. */
+    terminalTabsPresentationOnly?: boolean
+  } = {}
 ): WorkspaceSessionPatch {
   const snapshot = withoutStagedBrowserTabs(fullSnapshot)
   const changed = new Set(changedFields)
   const patch: WorkspaceSessionPatch = {}
+  const derivedFrom = new Set(changed)
+  if (options.terminalTabsPresentationOnly) {
+    derivedFrom.delete('tabsByWorktree')
+  }
 
   if (changed.has('activeRepoId')) {
     patch.activeRepoId = snapshot.activeRepoId
@@ -75,7 +83,7 @@ export function buildWorkspaceSessionPatch(
   if (changed.has('tabsByWorktree')) {
     patch.tabsByWorktree = buildSanitizedTabsByWorktree(snapshot.tabsByWorktree)
   }
-  const scrollbackHomesChanged = hasAnyChangedField(changed, [
+  const scrollbackHomesChanged = hasAnyChangedField(derivedFrom, [
     'terminalLayoutsByTabId',
     'localOnlyScrollbackByTabId',
     'tabsByWorktree',
@@ -84,12 +92,16 @@ export function buildWorkspaceSessionPatch(
   if (scrollbackHomesChanged) {
     const pruned = buildPrunedTerminalScrollback(snapshot)
     if (
-      hasAnyChangedField(changed, ['terminalLayoutsByTabId', 'tabsByWorktree', 'repos'] as const)
+      hasAnyChangedField(derivedFrom, [
+        'terminalLayoutsByTabId',
+        'tabsByWorktree',
+        'repos'
+      ] as const)
     ) {
       patch.terminalLayoutsByTabId = pruned.terminalLayoutsByTabId
     }
     if (
-      hasAnyChangedField(changed, [
+      hasAnyChangedField(derivedFrom, [
         'localOnlyScrollbackByTabId',
         'tabsByWorktree',
         'repos'
@@ -102,7 +114,7 @@ export function buildWorkspaceSessionPatch(
     patch.activeTabIdByWorktree = snapshot.activeTabIdByWorktree
   }
   if (
-    hasAnyChangedField(changed, [
+    hasAnyChangedField(derivedFrom, [
       'tabsByWorktree',
       'ptyIdsByTabId',
       'lastKnownRelayPtyIdByTabId',

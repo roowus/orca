@@ -21,6 +21,7 @@ import {
   type HostSessionWriteMode,
   type WorktreeHostClaims
 } from './workspace-session-host-contention'
+import type { HostSessionWriteAcks } from './workspace-session-host-write-acks'
 
 import {
   contestedPartitionHosts,
@@ -226,17 +227,32 @@ function splitWorkspaceSessionForWrite(
   return slices
 }
 
-/** Split patches by owner. localWrite orders SSH upload; written waits for all partitions and rejects failures so callers requeue fields. */
+/** Split patches by owner. localWrite orders SSH upload; written waits for all partitions and rejects failures so callers requeue fields. A host whose slice matches what it last acknowledged is not rewritten. */
 export function patchWorkspaceSessionByHost(
   api: SessionApi,
   patch: WorkspaceSessionPatch,
-  state: HostPersistenceState
+  state: HostPersistenceState,
+  acks?: HostSessionWriteAcks
 ): { localWrite: Promise<void>; written: Promise<void> } {
   const slices = splitWorkspaceSessionForWrite(patch as WorkspaceSessionState, state, 'patch')
+  const writeHost = (hostId: ExecutionHostId, slice: WorkspaceSessionPatch): Promise<void> => {
+    if (acks?.matches(hostId, slice as WorkspaceSessionState)) {
+      return Promise.resolve()
+    }
+    const write = hostId === LOCAL_EXECUTION_HOST_ID ? api.patch(slice) : api.patch(slice, hostId)
+    return write.then(
+      () => acks?.record(hostId, slice as WorkspaceSessionState),
+      (err: unknown) => {
+        // Main may hold part of a failed write, so this host's acknowledgements are unknown.
+        acks?.forget(hostId)
+        throw err
+      }
+    )
+  }
   const local = (slices[LOCAL_EXECUTION_HOST_ID] ?? patch) as WorkspaceSessionPatch
-  const localWrite = api.patch(local)
+  const localWrite = writeHost(LOCAL_EXECUTION_HOST_ID, local)
   const hostWrites = nonLocalHostSessionEntries(slices).map(([hostId, slice]) =>
-    api.patch(slice, hostId).catch((err: unknown) => {
+    writeHost(hostId, slice).catch((err: unknown) => {
       console.warn(`[session] host partition patch failed for ${hostId}:`, err)
       throw err
     })

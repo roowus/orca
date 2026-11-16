@@ -15,6 +15,7 @@ import {
   buildWorkspaceSessionHostSnapshots,
   patchWorkspaceSessionByHost
 } from '../lib/workspace/persistence/workspace-session-host-persistence'
+import { createHostSessionWriteAcks } from '../lib/workspace/persistence/workspace-session-host-write-acks'
 import {
   createShutdownCheckpointBeforeUnloadHandler,
   createShutdownCheckpointGuard
@@ -46,12 +47,14 @@ export function useAppSessionPersistence(): void {
 
   // Subscribe outside React: disk persistence needs no renders on tab/file/browser changes.
   useEffect(() => {
+    // Scoped to this subscriber's serialized writes; a remount starts from full writes.
+    const acks = createHostSessionWriteAcks()
     return createSessionWriteSubscriber({
       store: useAppStore,
       onPersistError: (error) => console.warn('[session] Session patch failed:', error),
       persist: ({ patch }) => {
         // Route each host’s workspace slice to its own partition.
-        return patchWorkspaceSessionByHost(window.api.session, patch, useAppStore.getState())
+        return patchWorkspaceSessionByHost(window.api.session, patch, useAppStore.getState(), acks)
           .written
       }
     })

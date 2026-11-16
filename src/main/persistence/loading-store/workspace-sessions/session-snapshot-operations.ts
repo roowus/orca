@@ -79,14 +79,22 @@ export class SessionSnapshotOperations {
 
   patchWorkspaceSession(patch: WorkspaceSessionPatch, hostId?: string | null): void {
     const resolved = resolveHostId(hostId)
+    const existing = this[sessionSnapshotOperationsContext].sessions.getWorkspaceSession(resolved)
     // Scalar patches skip topology work; membership patches retain stale-binding protections.
-    let next: WorkspaceSessionState = {
-      ...this[sessionSnapshotOperationsContext].sessions.getWorkspaceSession(resolved),
-      ...patch
-    }
-    if (workspaceSessionPatchNeedsFullNormalization(patch)) {
+    let next: WorkspaceSessionState = { ...existing, ...patch }
+    // Host partitions rebase stale snapshots against their own fences, so only local takes the labels-only path.
+    if (
+      workspaceSessionPatchNeedsFullNormalization(
+        patch,
+        resolved === LOCAL_EXECUTION_HOST_ID ? existing : undefined
+      )
+    ) {
       this.setWorkspaceSession(next, resolved)
       return
+    }
+    if (resolved === LOCAL_EXECUTION_HOST_ID && Object.hasOwn(patch, 'tabsByWorktree')) {
+      // Same admission as the full path it replaces.
+      this.assertSnapshotAdmission(true)
     }
     if (Object.hasOwn(patch, 'browserUrlHistory')) {
       next = pruneWorkspaceSessionBrowserHistory(next)
