@@ -6,6 +6,11 @@ import { join } from 'node:path'
 import { isDefinitiveAbsence } from '../../../shared/errors/definitive-filesystem-absence'
 import { AGENT_SESSION_ATTACHMENT_PART_FILE } from './agent-session-attachment-references'
 import { removeQuietly, type AgentSessionAttachmentStore } from './agent-session-attachment-store'
+import {
+  forgetKeptAgentSessionAttachment,
+  keepAgentSessionAttachmentUpload,
+  restoreKeptAgentSessionAttachments
+} from './agent-session-attachment-kept-links'
 
 export const ABANDONED_PART_MAX_AGE_MS = 60 * 60 * 1000
 export const UNCLAIMED_ATTACHMENT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
@@ -26,14 +31,19 @@ export async function sweepAgentSessionAttachments(
   now = Date.now()
 ): Promise<AgentSessionAttachmentSweepResult> {
   const removed: string[] = []
-  const remove = async (uploadDir: string): Promise<void> => {
+  const remove = async (uploadId: string): Promise<void> => {
+    const uploadDir = join(store.rootDir, uploadId)
     await removeQuietly(uploadDir)
+    await forgetKeptAgentSessionAttachment(store.rootDir, uploadId)
     facts.onUploadRemoved?.(uploadDir)
   }
   for (const uploadId of await facts.listBeingSwept()) {
-    await remove(join(store.rootDir, uploadId))
+    await remove(uploadId)
     await facts.finishSweep(uploadId)
   }
+  // Only after this build's own removals finish, so what is left to put back an older Orca removed.
+  // Never in the way of sweeping: a filesystem without hard links just keeps nothing.
+  await restoreKeptAgentSessionAttachments(store.rootDir).catch(() => {})
   for (const uploadId of await listDirectories(store.rootDir)) {
     if (store.isUploadInFlight(uploadId)) {
       continue
@@ -45,16 +55,17 @@ export async function sweepAgentSessionAttachments(
     const ageMs = now - (await modifiedAt(uploadDir))
     if (!stored) {
       if (ageMs > ABANDONED_PART_MAX_AGE_MS) {
-        await remove(uploadDir)
+        await remove(uploadId)
         removed.push(uploadDir)
       }
       continue
     }
     // Whichever lands first wins: claims retain uploads, sweep marks reject later claims.
     if (ageMs <= UNCLAIMED_ATTACHMENT_MAX_AGE_MS || !(await facts.markForSweep(uploadId, now))) {
+      await keepAgentSessionAttachmentUpload(store.rootDir, uploadId).catch(() => {})
       continue
     }
-    await remove(uploadDir)
+    await remove(uploadId)
     await facts.finishSweep(uploadId)
     removed.push(uploadDir)
   }
